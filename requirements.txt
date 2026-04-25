@@ -1,0 +1,6 @@
+multipledispatch
+numpy
+pillow
+pygame
+PyOpenGL
+pyrr
