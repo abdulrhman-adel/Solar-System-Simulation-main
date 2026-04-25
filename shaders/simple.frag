@@ -20,6 +20,7 @@ uniform sampler2D normalTexture;
 uniform sampler2D cloudTexture;
 uniform float cloudAnimationTime;
 uniform bool isEarth;
+uniform bool isOrbit;
 uniform vec3 sunPosition;
 uniform float sunRadius;
 uniform vec3 sunColor;
@@ -37,6 +38,11 @@ uniform vec3 lightPositions[NUM_LIGHTS];
 uniform float lightRadii[NUM_LIGHTS];
 
 void main() {
+    if (isOrbit) {
+        FragColor = vec4(1.0, 1.0, 1.0, 0.4); // White semi-transparent orbit line
+        return;
+    }
+
     // Sample the diffuse and normal textures
     vec4 diffuseColor = texture(diffuseTexture, DiffuseTexCoord);
     vec3 normal = texture(normalTexture, NormalTexCoord).rgb;
@@ -57,14 +63,26 @@ void main() {
 
         vec3 result = vec3(0.0);
 
+        vec3 current_ks = ks;
+        if (isEarth) {
+            vec4 baseEarth = texture(diffuseTexture, DiffuseTexCoord);
+            if (baseEarth.b > baseEarth.r * 1.5) {
+                current_ks = vec3(0.8, 0.8, 0.8); // Ocean
+            } else {
+                current_ks = vec3(0.05, 0.05, 0.05); // Land
+            }
+        }
+
         // Sun lighting with attenuation
         float sunDistance = length(sunPosition - FragPos);
         vec3 lightDir = normalize(sunPosition - FragPos);
         float NdotL = max(dot(norm, lightDir), 0.0);
+        float NdotL_raw = dot(norm, lightDir); // Raw dot for city lights terminator
+        
         vec3 diffuse = kd * NdotL * sunColor;
         vec3 halfDir = normalize(lightDir + viewDir);
         float NdotH = max(dot(norm, halfDir), 0.0);
-        vec3 specular = ks * pow(NdotH, shininess) * sunColor;
+        vec3 specular = current_ks * pow(NdotH, shininess) * sunColor;
         float sunAttenuation = 1.0 / (1.0 + 0.01 * sunDistance + 0.001 * sunDistance * sunDistance);
         result += (diffuse + specular) * sunAttenuation;
 
@@ -84,7 +102,7 @@ void main() {
             // Specular lighting
             vec3 halfDir = normalize(lightDir + viewDir);
             float NdotH = max(dot(norm, halfDir), 0.0);
-            vec3 specular = ks * pow(NdotH, shininess);
+            vec3 specular = current_ks * pow(NdotH, shininess);
 
             // Attenuation based on distance
             float attenuation = 1.0 / (1.0 + 0.1 * distance + 0.01 * distance * distance);
@@ -108,6 +126,25 @@ void main() {
 
         // Apply the lighting to the diffuse color
         vec3 finalColor = result * diffuseColor.rgb;
+
+        if (isEarth) {
+            vec4 baseEarth = texture(diffuseTexture, DiffuseTexCoord);
+            bool isLand = (baseEarth.g > baseEarth.b) || (baseEarth.r > baseEarth.b * 0.8);
+            if (isLand && NdotL_raw < 0.1) {
+                float scale = 200.0;
+                vec2 p = DiffuseTexCoord * scale;
+                float noise = fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);
+                
+                // Clusters to simulate cities
+                float mask = smoothstep(0.85, 1.0, noise);
+                
+                // Fade lights in near the terminator
+                float fade = smoothstep(0.1, -0.2, NdotL_raw);
+                
+                // Add a warm yellow-ish city light glow
+                finalColor += vec3(1.0, 0.8, 0.4) * mask * fade * 0.8;
+            }
+        }
 
         // Gamma correction
         const float gamma = 2.2;

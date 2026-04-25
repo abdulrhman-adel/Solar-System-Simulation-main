@@ -4,14 +4,14 @@ from GLWindow import OpenGLWindow
 def handle_keydown_event(event, window):
     """
     Handle the keydown event.
-
-    Args:
-        event (pygame.event.Event): The keydown event.
-        window (OpenGLWindow): The OpenGL window.
     """
     if event.key == pg.K_SPACE:
         window.toggle_animation()
         print(f"Animation running: {window.animation_running}")
+    elif event.key == pg.K_0:
+        window.target_planet_index = -1
+    elif pg.K_1 <= event.key <= pg.K_8:
+        window.target_planet_index = event.key - pg.K_1
 
 def handle_mouse_motion(event, window):
     """

@@ -4,6 +4,7 @@ from OpenGL.GL.shaders import compileProgram, compileShader
 import numpy as np
 import pyrr
 import math
+import random
 from Geometry import Geometry
 from PIL import Image
 from Planet import Planet
@@ -39,6 +40,7 @@ class OpenGLWindow:
         self.diffuse_textures = {}
         self.normal_textures = {}
         self.cloud_textures = {}
+        self.target_planet_index = -1
     
     def init_planets(self):
         """
@@ -106,6 +108,8 @@ class OpenGLWindow:
             screen_width (int, optional): The width of the screen. Defaults to 800.
             screen_height (int, optional): The height of the screen. Defaults to 600.
         """
+        self.screen_width = screen_width
+        self.screen_height = screen_height
         pg.init()
         pg.display.gl_set_attribute(pg.GL_CONTEXT_PROFILE_MASK, pg.GL_CONTEXT_PROFILE_CORE)
         pg.display.gl_set_attribute(pg.GL_CONTEXT_MAJOR_VERSION, 3)
@@ -159,6 +163,13 @@ class OpenGLWindow:
         self.light_colors = np.array(self.light_colors, dtype=np.float32)
 
         self.init_orbit_geometry()
+        self.init_asteroids()
+
+        pg.font.init()
+        self.font = pg.font.SysFont('Arial', 20)
+        self.hud_shader = self.load_shader_program("./shaders/hud.vert", "./shaders/hud.frag")
+        self.init_hud_geometry()
+        self.init_fbo()
 
         print("Setup complete!")
     
@@ -319,6 +330,85 @@ class OpenGLWindow:
         glEnableVertexAttribArray(2)
         glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, 32, ctypes.c_void_p(20))
 
+    def init_asteroids(self):
+        """
+        Initializes an asteroid belt between Mars and Jupiter.
+        Mars distance: 21, Jupiter distance: 29. Belt range: 23 to 27.
+        """
+        self.asteroids = []
+        for _ in range(500):
+            angle_offset = random.uniform(0, 2 * math.pi)
+            dist = random.uniform(self.first_planet_distance + 15, self.first_planet_distance + 18.5)
+            height = random.uniform(-0.8, 0.8)
+            speed = random.uniform(6.0, 9.0)
+            scale = random.uniform(0.015, 0.1)
+            rot_speed = random.uniform(-20.0, 20.0)
+            self.asteroids.append({
+                'base_dist': dist,
+                'height': height,
+                'speed': speed,
+                'scale': scale,
+                'angle_offset': angle_offset,
+                'rot_speed': rot_speed
+            })
+
+    def init_hud_geometry(self):
+        """
+        Initializes the VBO for a full-screen HUD quad.
+        """
+        self.hud_vao = glGenVertexArrays(1)
+        glBindVertexArray(self.hud_vao)
+        hud_vertices = np.array([
+            # x, y, u, v  (V is flipped because Pygame surface coordinate 0,0 is top-left)
+            -1.0,  1.0, 0.0, 0.0,
+            -1.0, -1.0, 0.0, 1.0,
+             1.0, -1.0, 1.0, 1.0,
+            -1.0,  1.0, 0.0, 0.0,
+             1.0, -1.0, 1.0, 1.0,
+             1.0,  1.0, 1.0, 0.0
+        ], dtype=np.float32)
+
+        self.hud_vbo = glGenBuffers(1)
+        glBindBuffer(GL_ARRAY_BUFFER, self.hud_vbo)
+        glBufferData(GL_ARRAY_BUFFER, hud_vertices.nbytes, hud_vertices, GL_STATIC_DRAW)
+        
+        glEnableVertexAttribArray(0)
+        glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 16, ctypes.c_void_p(0))
+        glEnableVertexAttribArray(1)
+        glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 16, ctypes.c_void_p(8))
+        
+        self.hud_texture = glGenTextures(1)
+        glBindTexture(GL_TEXTURE_2D, self.hud_texture)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
+
+    def init_fbo(self):
+        """
+        Initializes the Framebuffer for post-processing Bloom effect.
+        """
+        self.fbo = glGenFramebuffers(1)
+        glBindFramebuffer(GL_FRAMEBUFFER, self.fbo)
+
+        self.fbo_texture = glGenTextures(1)
+        glBindTexture(GL_TEXTURE_2D, self.fbo_texture)
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, self.screen_width, self.screen_height, 0, GL_RGB, GL_UNSIGNED_BYTE, None)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+        glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, self.fbo_texture, 0)
+
+        self.rbo = glGenRenderbuffers(1)
+        glBindRenderbuffer(GL_RENDERBUFFER, self.rbo)
+        glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, self.screen_width, self.screen_height)
+        glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, self.rbo)
+
+        if glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE:
+            print("ERROR::FRAMEBUFFER:: Framebuffer is not complete!")
+        glBindFramebuffer(GL_FRAMEBUFFER, 0)
+        
+        self.post_shader = self.load_shader_program("./shaders/post.vert", "./shaders/post.frag")
+
     def toggle_animation(self):
         """
         Toggle the animation on/off.
@@ -329,8 +419,21 @@ class OpenGLWindow:
         """
         Render the scene.
         """
+        glBindFramebuffer(GL_FRAMEBUFFER, self.fbo)
+        glEnable(GL_DEPTH_TEST)
+        glClearColor(0, 0, 0, 1)
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
         glUseProgram(self.shader)
+
+        # Update the animation time if the animation is running
+        if self.animation_running:
+            self.animation_time += 0.001
+            self.cloud_animation_time += 0.01
+
+        # Update planet angles early so the camera can track them
+        for planet in self.planets:
+            planet.angle = planet.speed * self.animation_time
+            planet.rotation_angle = planet.rotation_speed * self.animation_time
 
         # Set up the projection matrix
         aspect_ratio = 640.0 / 480.0
@@ -343,30 +446,43 @@ class OpenGLWindow:
         glUniformMatrix4fv(projection_loc, 1, GL_FALSE, projection)
 
         # Set up the view matrix based on camera rotation angles
-        view_matrix = pyrr.matrix44.create_identity()
-        view_matrix = pyrr.matrix44.multiply(view_matrix, pyrr.matrix44.create_from_y_rotation(self.camera_rotation_y))
-        view_matrix = pyrr.matrix44.multiply(view_matrix, pyrr.matrix44.create_from_x_rotation(self.camera_rotation_x))
-        view_matrix = pyrr.matrix44.multiply(view_matrix, pyrr.matrix44.create_from_z_rotation(self.camera_rotation_z))
-        view_matrix = pyrr.matrix44.multiply(view_matrix, pyrr.matrix44.create_from_translation(pyrr.Vector3([0.0, 0.0, -self.camera_distance])))
+        if self.target_planet_index != -1 and self.target_planet_index < len(self.planets):
+            target = self.planets[self.target_planet_index]
+            target_pos = pyrr.Vector3([target.distance * math.cos(target.angle), 0.0, target.distance * math.sin(target.angle)])
+            
+            # The zooming range is closer since we're viewing a planet
+            zoom = max(2.5 * target.radius, self.camera_distance * 0.15)
+            
+            camera_offset = pyrr.Vector3([
+                zoom * math.cos(self.camera_rotation_y) * math.cos(self.camera_rotation_x),
+                zoom * math.sin(self.camera_rotation_x),
+                zoom * math.cos(self.camera_rotation_x) * math.sin(self.camera_rotation_y)
+            ])
+            camera_position = target_pos + camera_offset
+            
+            view_matrix = pyrr.matrix44.create_look_at(camera_position, target_pos, pyrr.Vector3([0.0, 1.0, 0.0]))
+        else:
+            view_matrix = pyrr.matrix44.create_identity()
+            view_matrix = pyrr.matrix44.multiply(view_matrix, pyrr.matrix44.create_from_y_rotation(self.camera_rotation_y))
+            view_matrix = pyrr.matrix44.multiply(view_matrix, pyrr.matrix44.create_from_x_rotation(self.camera_rotation_x))
+            view_matrix = pyrr.matrix44.multiply(view_matrix, pyrr.matrix44.create_from_z_rotation(self.camera_rotation_z))
+            view_matrix = pyrr.matrix44.multiply(view_matrix, pyrr.matrix44.create_from_translation(pyrr.Vector3([0.0, 0.0, -self.camera_distance])))
+
+            # Calculate the camera position based on the rotation angles
+            camera_position = pyrr.Vector3([
+                self.camera_distance * math.cos(self.camera_rotation_y) * math.cos(self.camera_rotation_x),
+                self.camera_distance * math.sin(self.camera_rotation_x),
+                self.camera_distance * math.cos(self.camera_rotation_x) * math.sin(self.camera_rotation_y)
+            ])
 
         view_loc = glGetUniformLocation(self.shader, "view")
         glUniformMatrix4fv(view_loc, 1, GL_FALSE, view_matrix)
-
-        # Calculate the camera position based on the rotation angles
-        camera_position = pyrr.Vector3([
-            self.camera_distance * math.cos(self.camera_rotation_y) * math.cos(self.camera_rotation_x),
-            self.camera_distance * math.sin(self.camera_rotation_x),
-            self.camera_distance * math.cos(self.camera_rotation_x) * math.sin(self.camera_rotation_y)
-        ])
 
         # Set the camera position as the viewPos uniform
         glUniform3fv(glGetUniformLocation(self.shader, "viewPos"), 1, camera_position)
 
 
-        # Update the animation time if the animation is running
-        if self.animation_running:
-            self.animation_time += 0.001
-            self.cloud_animation_time += 0.01
+
 
         glUniform1f(glGetUniformLocation(self.shader, "cloudAnimationTime"), self.cloud_animation_time)
 
@@ -410,8 +526,6 @@ class OpenGLWindow:
 
         # Draw the Planets
         for planet in self.planets:
-            planet.angle = planet.speed * self.animation_time
-            planet.rotation_angle = planet.rotation_speed * self.animation_time
 
             # Bind the planet textures
             glActiveTexture(GL_TEXTURE0)
@@ -477,6 +591,33 @@ class OpenGLWindow:
             orbit_model = pyrr.matrix44.create_identity()
             orbit_model = pyrr.matrix44.multiply(orbit_model, pyrr.matrix44.create_from_scale(pyrr.Vector3([planet.distance, 1.0, planet.distance])))
             self.draw_orbit_ring(orbit_model)
+
+        # Draw the Asteroid Belt
+        glActiveTexture(GL_TEXTURE0)
+        glBindTexture(GL_TEXTURE_2D, self.diffuse_textures["Moon"]) # Use moon texture for rocks
+        glUniform1i(glGetUniformLocation(self.shader, "diffuseTexture"), 0)
+
+        glActiveTexture(GL_TEXTURE1)
+        glBindTexture(GL_TEXTURE_2D, self.normal_textures["Moon"])
+        glUniform1i(glGetUniformLocation(self.shader, "normalTexture"), 1)
+
+        ast_ka = np.array([0.1, 0.1, 0.1], dtype=np.float32)
+        ast_kd = np.array([0.4, 0.4, 0.4], dtype=np.float32)
+        ast_ks = np.array([0.05, 0.05, 0.05], dtype=np.float32)
+        ast_shininess = 8.0
+
+        for ast in self.asteroids:
+            ast_angle = ast['angle_offset'] + ast['speed'] * self.animation_time
+            ast_rot = ast['rot_speed'] * self.animation_time
+            ast_model = pyrr.matrix44.create_from_y_rotation(ast_rot)
+            ast_model = pyrr.matrix44.multiply(ast_model, pyrr.matrix44.create_from_scale(pyrr.Vector3([ast['scale'], ast['scale'], ast['scale']])))
+            ast_position = pyrr.Vector3([
+                ast['base_dist'] * math.cos(ast_angle),
+                ast['height'],
+                ast['base_dist'] * math.sin(ast_angle)
+            ])
+            ast_model = pyrr.matrix44.multiply(ast_model, pyrr.matrix44.create_from_translation(ast_position))
+            self.draw_object(self.sphere, ast_model, ast_ka, ast_kd, ast_ks, ast_shininess)
     
 
         # Draw Saturn's Ring
@@ -563,7 +704,65 @@ class OpenGLWindow:
         glUniform3fv(glGetUniformLocation(self.shader, "lightPositions"), len(self.light_positions), self.light_positions)
         glUniform3fv(glGetUniformLocation(self.shader, "lightColors"), len(self.light_colors), self.light_colors)
 
+        # Unbind FBO and draw to screen
+        glBindFramebuffer(GL_FRAMEBUFFER, 0)
+        glClearColor(1.0, 1.0, 1.0, 1.0)
+        glClear(GL_COLOR_BUFFER_BIT)
+        
+        glDisable(GL_DEPTH_TEST)
+        
+        glUseProgram(self.post_shader)
+        glBindVertexArray(self.hud_vao) # Reuse HUD quad geometry
+        
+        glActiveTexture(GL_TEXTURE0)
+        glBindTexture(GL_TEXTURE_2D, self.fbo_texture)
+        glUniform1i(glGetUniformLocation(self.post_shader, "screenTexture"), 0)
+        
+        glDrawArrays(GL_TRIANGLES, 0, 6)
+        
+        glEnable(GL_DEPTH_TEST)
+
+        self.render_hud()
+
         pg.display.flip()
+
+    def render_hud(self):
+        """
+        Renders Pygame text to an OpenGL texture and draws it as an overlay.
+        """
+        hud_surface = pg.Surface((self.screen_width, self.screen_height), pg.SRCALPHA)
+        
+        mode = "Viewing: Free Camera (Sun Focused)"
+        if self.target_planet_index != -1 and self.target_planet_index < len(self.planets):
+            mode = f"Viewing: Tracking {self.planets[self.target_planet_index].name}"
+        
+        text1 = self.font.render(mode, True, (255, 255, 255))
+        hud_surface.blit(text1, (20, 20))
+        
+        text2 = self.font.render("Mouse: Left-click & drag to rotate | Scroll to zoom", True, (200, 200, 200))
+        hud_surface.blit(text2, (20, 50))
+
+        text3 = self.font.render("Keys 1-8: Focus Planet | Key 0: Reset to Sun | SPACE: Pause", True, (200, 200, 200))
+        hud_surface.blit(text3, (20, 80))
+        
+        text_data = pg.image.tostring(hud_surface, "RGBA", False)
+        
+        glActiveTexture(GL_TEXTURE0)
+        glBindTexture(GL_TEXTURE_2D, self.hud_texture)
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, self.screen_width, self.screen_height, 0, GL_RGBA, GL_UNSIGNED_BYTE, text_data)
+        
+        glUseProgram(self.hud_shader)
+        glUniform1i(glGetUniformLocation(self.hud_shader, "textTexture"), 0)
+
+        glDisable(GL_DEPTH_TEST)
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+        
+        glBindVertexArray(self.hud_vao)
+        glDrawArrays(GL_TRIANGLES, 0, 6)
+        
+        glDisable(GL_BLEND)
+        glEnable(GL_DEPTH_TEST)
 
     def draw_object(self, obj, model, ka, kd, ks, shininess, is_sun=False, is_saturn_ring=False, is_starry_background=False, planet=None):
         """
@@ -581,8 +780,14 @@ class OpenGLWindow:
             is_starry_background (bool, optional): Whether the object is the starry background. Defaults to False.
             planet (Planet, optional): The planet object, if applicable. Defaults to None.
         """
+        glBindVertexArray(self.vao)
+        
         model_loc = glGetUniformLocation(self.shader, "model")
         glUniformMatrix4fv(model_loc, 1, GL_FALSE, model)
+
+        # Set isOrbit flag to 0 for regular objects
+        is_orbit_loc = glGetUniformLocation(self.shader, "isOrbit")
+        glUniform1i(is_orbit_loc, 0)
 
         if planet is not None:
             atmosphere_thickness_loc = glGetUniformLocation(self.shader, "atmosphereThickness")
@@ -645,16 +850,24 @@ class OpenGLWindow:
         glUniform1f(shininess_loc, 1.0)
         
         is_sun_loc = glGetUniformLocation(self.shader, "isSun")
-        glUniform1i(is_sun_loc, 1) # Treat as sun to ignore complex shading
+        glUniform1i(is_sun_loc, 0) # Treat as sun to ignore complex shading
         is_saturn_ring_loc = glGetUniformLocation(self.shader, "isSaturnRing")
         glUniform1i(is_saturn_ring_loc, 0)
         is_starry_background_loc = glGetUniformLocation(self.shader, "isStarryBackground")
         glUniform1i(is_starry_background_loc, 0)
         glUniform1i(glGetUniformLocation(self.shader, "isEarth"), 0)
 
+        is_orbit_loc = glGetUniformLocation(self.shader, "isOrbit")
+        glUniform1i(is_orbit_loc, 1)
+
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+
         glBindVertexArray(self.orbit_vao)
         glDrawArrays(GL_LINE_LOOP, 0, self.orbit_vertex_count)
         glBindVertexArray(self.vao)
+
+        glDisable(GL_BLEND)
 
     def cleanup(self):
         """
@@ -662,6 +875,12 @@ class OpenGLWindow:
         """
         self.sphere.cleanup()
         glDeleteProgram(self.shader)
+        glDeleteProgram(self.hud_shader)
+        glDeleteProgram(self.post_shader)
         glDeleteVertexArrays(1, (self.vao,))
         glDeleteVertexArrays(1, (self.orbit_vao,))
+        glDeleteVertexArrays(1, (self.hud_vao,))
         glDeleteBuffers(1, (self.orbit_vbo,))
+        glDeleteBuffers(1, (self.hud_vbo,))
+        glDeleteFramebuffers(1, (self.fbo,))
+        glDeleteRenderbuffers(1, (self.rbo,))
