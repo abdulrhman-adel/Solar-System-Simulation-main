@@ -332,24 +332,27 @@ class OpenGLWindow:
 
     def init_asteroids(self):
         """
-        Initializes an asteroid belt between Mars and Jupiter.
-        Mars distance: 21, Jupiter distance: 29. Belt range: 23 to 27.
+        Initializes an asteroid belt with eccentric orbits to force collisions.
         """
         self.asteroids = []
+        self.explosions = []
         for _ in range(500):
             angle_offset = random.uniform(0, 2 * math.pi)
-            dist = random.uniform(self.first_planet_distance + 15, self.first_planet_distance + 18.5)
+            dist_x = random.uniform(self.first_planet_distance + 5, self.first_planet_distance + 22.0)
+            dist_z = random.uniform(self.first_planet_distance + 15, self.first_planet_distance + 35.0)
             height = random.uniform(-0.8, 0.8)
             speed = random.uniform(6.0, 9.0)
             scale = random.uniform(0.015, 0.1)
             rot_speed = random.uniform(-20.0, 20.0)
             self.asteroids.append({
-                'base_dist': dist,
+                'dist_x': dist_x,
+                'dist_z': dist_z,
                 'height': height,
                 'speed': speed,
                 'scale': scale,
                 'angle_offset': angle_offset,
-                'rot_speed': rot_speed
+                'rot_speed': rot_speed,
+                'alive': True
             })
 
     def init_hud_geometry(self):
@@ -606,16 +609,43 @@ class OpenGLWindow:
         ast_ks = np.array([0.05, 0.05, 0.05], dtype=np.float32)
         ast_shininess = 8.0
 
+        planet_data = []
+        for planet in self.planets:
+            planet_pos = pyrr.Vector3([planet.distance * math.cos(planet.angle), 0.0, planet.distance * math.sin(planet.angle)])
+            planet_data.append((planet.radius, planet_pos))
+
         for ast in self.asteroids:
+            if not ast['alive']:
+                continue
+
             ast_angle = ast['angle_offset'] + ast['speed'] * self.animation_time
             ast_rot = ast['rot_speed'] * self.animation_time
             ast_model = pyrr.matrix44.create_from_y_rotation(ast_rot)
             ast_model = pyrr.matrix44.multiply(ast_model, pyrr.matrix44.create_from_scale(pyrr.Vector3([ast['scale'], ast['scale'], ast['scale']])))
             ast_position = pyrr.Vector3([
-                ast['base_dist'] * math.cos(ast_angle),
+                ast['dist_x'] * math.cos(ast_angle),
                 ast['height'],
-                ast['base_dist'] * math.sin(ast_angle)
+                ast['dist_z'] * math.sin(ast_angle)
             ])
+
+            # Check collision
+            collision = False
+            for p_rad, p_pos in planet_data:
+                dist = np.linalg.norm(ast_position - p_pos)
+                if dist < (p_rad + ast['scale']):
+                    collision = True
+                    self.explosions.append({
+                        'pos': ast_position,
+                        'time': 0.0,
+                        'max_time': 1.5,
+                        'scale': max(ast['scale'] * 15.0, 0.5)
+                    })
+                    break
+
+            if collision:
+                ast['alive'] = False
+                continue
+
             ast_model = pyrr.matrix44.multiply(ast_model, pyrr.matrix44.create_from_translation(ast_position))
             self.draw_object(self.sphere, ast_model, ast_ka, ast_kd, ast_ks, ast_shininess)
     
@@ -691,6 +721,40 @@ class OpenGLWindow:
 
         # Draw the starry background sphere
         self.draw_object(self.sphere, background_model, None, None, None, None, is_starry_background=True)
+
+        # Draw Explosions
+        exp_ka = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+        exp_kd = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+        exp_ks = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+        is_explosion_loc = glGetUniformLocation(self.shader, "isExplosion")
+        explosion_alpha_loc = glGetUniformLocation(self.shader, "explosionAlpha")
+        
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+
+        for exp in self.explosions[:]:
+            exp['time'] += 0.016 # Approximated roughly based on 60fps
+            if exp['time'] >= exp['max_time']:
+                self.explosions.remove(exp)
+                continue
+                
+            progress = exp['time'] / exp['max_time']
+            current_scale = exp['scale'] * (1.0 + progress * 2.5)
+            alpha = max(1.0 - progress, 0.0)
+            
+            exp_model = pyrr.matrix44.create_identity()
+            exp_model = pyrr.matrix44.multiply(exp_model, pyrr.matrix44.create_from_scale(pyrr.Vector3([current_scale, current_scale, current_scale])))
+            exp_model = pyrr.matrix44.multiply(exp_model, pyrr.matrix44.create_from_translation(exp['pos']))
+            
+            glUniform1i(is_explosion_loc, 1)
+            glUniform1f(explosion_alpha_loc, alpha)
+            
+            # Use `draw_object` with standard params, shader logic for explosions skips texture processing
+            self.draw_object(self.sphere, exp_model, exp_ka, exp_kd, exp_ks, 1.0)
+
+        # Restore explosion shader setting immediately
+        glUniform1i(is_explosion_loc, 0)
+        glDisable(GL_BLEND)
 
         # Update the light positions based on the planet positions
         self.light_positions = []

@@ -21,6 +21,8 @@ uniform sampler2D cloudTexture;
 uniform float cloudAnimationTime;
 uniform bool isEarth;
 uniform bool isOrbit;
+uniform bool isExplosion;
+uniform float explosionAlpha;
 uniform vec3 sunPosition;
 uniform float sunRadius;
 uniform vec3 sunColor;
@@ -38,6 +40,10 @@ uniform vec3 lightPositions[NUM_LIGHTS];
 uniform float lightRadii[NUM_LIGHTS];
 
 void main() {
+    if (isExplosion) {
+        FragColor = vec4(1.0, 0.5, 0.05, explosionAlpha); // Glowing orange explosion
+        return;
+    }
     if (isOrbit) {
         FragColor = vec4(1.0, 1.0, 1.0, 0.4); // White semi-transparent orbit line
         return;
